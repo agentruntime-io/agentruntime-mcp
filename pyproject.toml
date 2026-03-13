@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentruntime-mcp"
+version = "0.0.1"
+description = "AgentRuntime MCP SDK (decorators, runtime, middleware, schemas, proxy, generators)"
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{ name = "AgentRuntime" }]
+dependencies = [
+  "fastmcp>=2.10.0",
+  "pydantic>=2",
+  "starlette>=0.37",
+  "uvicorn[standard]>=0.30",
+  "opentelemetry-api>=1.25",
+  "opentelemetry-sdk>=1.25",
+  "opentelemetry-exporter-otlp>=1.25",
+  "PyYAML>=6",
+  "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+
