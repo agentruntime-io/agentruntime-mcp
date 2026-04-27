@@ -648,7 +648,7 @@ def _build_runtime_context(context: Any, req: Any) -> Dict[str, Any]:
     Control resolves tenant_id, user_id, workflow_id, run_id from the Bearer run token."""
     ctx: Dict[str, Any] = {}
 
-    # server_id: prefer MCP_SERVER_ID env (set at deploy), then header/query
+    # server_id: MCP_SERVER_ID env or header/query (fallback when X-MCP-Instance-Id is absent; AgentRuntime normally sends the instance header)
     server_id = os.environ.get("MCP_SERVER_ID", "").strip()
     if not server_id and req is not None:
         server_id = _pick_from_req(req, ["X-MCP-Server-Id"], ["server_id"])
