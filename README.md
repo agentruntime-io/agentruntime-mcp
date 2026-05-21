@@ -103,3 +103,7 @@ For Node deployments, use the monorepo package [`packages/agentruntime-mcp-ts`](
 ## Examples in this repo
 
 - [`connectors/py-connectors/resend-connector`](../../connectors/py-connectors/resend-connector/) — Python Resend connector (illustrative layout)
+
+## Releasing
+
+See [`../RELEASE.md`](../RELEASE.md) (Python section): lightweight Git tags (`v0.1.0`, `v0.1.1`), bump `version` in `pyproject.toml`, do not commit `__pycache__` / `*.egg-info/`.
