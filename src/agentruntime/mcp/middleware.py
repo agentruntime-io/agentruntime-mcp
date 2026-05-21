@@ -6,22 +6,20 @@ import os
 import traceback
 import asyncio
 import json
-import uuid
 from typing import Any, Dict, Optional
-import time
-import hmac
-import hashlib
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
+
 from .context import attach_config_to_ctx, reset_request_context, set_request_context
+from .errors import ControlError, human_message_from_control_api_body
 
 # Context var for HTTP request when processing initialize in stateless mode.
 # Patched MiddlewareServerSession sets this from responder.message_metadata.request_context
-# before middleware runs, so AuthToken and ControlConfig can read the token.
+# before middleware runs, so ControlConfigMiddleware can read headers/tokens.
 _http_request_ctx: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "agentruntime_http_request", default=None
 )
@@ -275,172 +273,134 @@ class CustomHeaderMiddleware(Middleware):
             return result
 
 
-def _is_run_token(s: str) -> bool:
-    """Check if string is a valid UUID (run token from Control)."""
-    if not s or not isinstance(s, str):
-        return False
-    try:
-        uuid.UUID(s)
-        return True
-    except (ValueError, TypeError):
-        return False
-
-
-class AuthTokenMiddleware(Middleware):
-    """Require Bearer run token (UUID from Control). Use MCP_SKIP_AUTH_FOR_INITIALIZE=1 for local dev only."""
-
-    async def on_request(self, context: MiddlewareContext, call_next):
-        req = _request_from_context(context)
-        if _is_schema_endpoint(req):
-            return await call_next(context)
-
-        token = _extract_token_from_context(context, req)
-
-        if not token:
-            skip_for_init = os.getenv("MCP_SKIP_AUTH_FOR_INITIALIZE", "").strip().lower() in ("1", "true", "yes")
-            if skip_for_init and getattr(context, "method", None) == "initialize":
-                logging.debug(
-                    "[AuthToken] MCP_SKIP_AUTH_FOR_INITIALIZE: allowing initialize without token (local dev only)"
-                )
-            else:
-                had_ctx = False
-                try:
-                    had_ctx = _http_request_ctx.get() is not None
-                except LookupError:
-                    pass
-                logging.warning(
-                    "[AuthToken] invalid or missing auth token (method=%s, had_http_request_ctx=%s)",
-                    getattr(context, "method", "?"),
-                    had_ctx,
-                )
-                raise PermissionError("invalid or missing auth token")
-        elif not _is_run_token(token):
-            raise PermissionError("invalid or missing auth token")
-
-        return await call_next(context)
-
-
 class ControlConfigMiddleware(Middleware):
-    def __init__(self, config_schema: Optional[Dict[str, Any]] = None, server_path: str = "/mcp/config") -> None:
+    """POST /mcp/config resolution aligned with agentruntime-mcp-go middleware."""
+
+    def __init__(self, config_schema: Optional[Dict[str, Any]] = None, mount_path: str = "/mcp") -> None:
         self.config_schema = config_schema or {}
-        self.server_path = server_path
+        self.mount_path = mount_path.rstrip("/") or "/mcp"
 
     async def on_request(self, context: MiddlewareContext, call_next):
         fast_ctx = getattr(context, "fastmcp_context", None)
         req = _request_from_context(context)
-        if _is_schema_endpoint(req):
+        if req is None:
+            return await call_next(context)
+
+        method = (getattr(req, "method", "") or "").upper()
+        raw_path = getattr(getattr(req, "url", None), "path", "") or ""
+
+        from .auth_http import is_schema_endpoint_for_mount
+
+        if is_schema_endpoint_for_mount(method, raw_path, self.mount_path):
             return JSONResponse(self.config_schema or {})
+
+        json_body: Optional[Dict[str, Any]] = None
+        if method == "POST":
+            try:
+                body = await req.body()
+                if body:
+                    parsed = json.loads(body.decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        json_body = parsed
+            except Exception:
+                json_body = None
+
+        from .auth_http import needs_resolved_config_from_body
+
+        need_config = needs_resolved_config_from_body(json_body)
 
         token = _extract_token_from_context(context, req)
         control_base = (os.getenv("MCP_CONTROL_SERVER_URL") or "").strip()
-        required = os.getenv("MCP_CONFIG_FETCH_REQUIRED", "true").lower() == "true"
+        config_required = os.getenv("MCP_CONFIG_FETCH_REQUIRED", "true").lower() != "false"
 
-        resolved_config: Dict[str, Any] = {}
-        if control_base:
-            if not token:
-                if required:
-                    raise PermissionError("missing auth token for control config resolution")
-            else:
-                timeout = float(os.getenv("MCP_CONTROL_TIMEOUT_SEC", "5"))
+        from .config_schema import config_schema_has_keys
+
+        want_control = config_schema_has_keys(self.config_schema)
+
+        from .env_merge import (
+            env_alone_satisfies_required,
+            env_overrides_from_schema,
+            merge_control_with_env_priority,
+            new_lowercase_env_index,
+        )
+
+        env_idx = new_lowercase_env_index()
+        env_keys = env_overrides_from_schema(self.config_schema, env_idx)
+
+        cfg_dict: Dict[str, Any] = {}
+
+        if want_control and need_config:
+            try_control = control_base != "" and token != ""
+            if try_control:
                 runtime_context = _build_runtime_context(context, req)
+                timeout = float(os.getenv("MCP_CONTROL_TIMEOUT_SEC", "5"))
                 try:
-                    resolved_config = await asyncio.to_thread(
+                    resolved = await asyncio.to_thread(
                         _fetch_control_config,
                         control_base,
-                        self.server_path,
                         token,
                         self.config_schema,
                         runtime_context,
                         timeout,
                     )
+                    cfg_dict = resolved or {}
+                except ControlError as exc:
+                    logging.error("control config fetch failed: %s", exc)
+                    if config_required and not env_alone_satisfies_required(self.config_schema, env_idx):
+                        status = exc.status
+                        client_msg = str(exc)
+                        hm = human_message_from_control_api_body(exc.body)
+                        if hm:
+                            client_msg = f"MCP control config: {hm}"
+                        if status in (401, 403):
+                            status = 422
+                        if status < 400 or status >= 600:
+                            status = 502
+                        return PlainTextResponse(client_msg, status_code=status)
                 except Exception as exc:
-                    if required:
-                        raise PermissionError(f"control config resolution failed: {exc}") from exc
+                    logging.error("control config fetch failed: %s", exc)
+                    if config_required and not env_alone_satisfies_required(self.config_schema, env_idx):
+                        return PlainTextResponse(
+                            f"control config resolution failed: {exc}",
+                            status_code=502,
+                        )
+            else:
+                if (
+                    control_base == ""
+                    and config_required
+                    and not env_alone_satisfies_required(self.config_schema, env_idx)
+                ):
+                    logging.warning(
+                        "MCP_CONTROL_SERVER_URL is required when the adapter registers config schema keys"
+                    )
+                    return PlainTextResponse(
+                        "MCP_CONTROL_SERVER_URL is required when config schema has keys",
+                        status_code=503,
+                    )
+                if (
+                    control_base != ""
+                    and not token
+                    and config_required
+                    and not env_alone_satisfies_required(self.config_schema, env_idx)
+                ):
+                    logging.warning("missing auth token for control config resolution")
+                    return PlainTextResponse(
+                        "missing auth token for control config resolution",
+                        status_code=401,
+                    )
 
-        tokens = set_request_context(token, resolved_config)
+        final_cfg = merge_control_with_env_priority(cfg_dict, env_keys, self.config_schema)
+
+        tokens = set_request_context(token, final_cfg)
         try:
-            # Attach onto FastMCP context so user code can access ctx.config directly.
-            attach_config_to_ctx(fast_ctx, resolved_config)
-            result = await call_next(context)
-            return result
+            attach_config_to_ctx(fast_ctx, final_cfg)
+            return await call_next(context)
         finally:
             reset_request_context(tokens)
 
 
-# Simple HMAC auth: client sends X-MCP-KeyId, X-MCP-Timestamp, X-MCP-Signature.
-# Signature is hex(hmac_sha256(secret, f"{ts}\n{method}\n{path}")) with up to 5 minutes skew.
-class HMACAuthMiddleware(Middleware):
-    def _load_secret(self, key_id: str) -> Optional[str]:
-        # Single key via env
-        single_id = os.getenv("MCP_HMAC_KEY_ID")
-        single_secret = os.getenv("MCP_HMAC_SECRET")
-        if single_id and single_secret and key_id == single_id:
-            return single_secret
-        # TODO: Optionally support JSON map in MCP_HMAC_KEYS_JSON later
-        return None
-
-    async def on_request(self, context: MiddlewareContext, call_next):
-        req = None
-        try:
-            fast_ctx = getattr(context, "fastmcp_context", None)
-            if fast_ctx is not None and getattr(fast_ctx, "request_context", None) is not None:
-                req = getattr(fast_ctx.request_context, "request", None)
-        except Exception:
-            req = None
-        if _is_schema_endpoint(req):
-            return await call_next(context)
-
-        # If HMAC is configured via env, enforce; otherwise allow through
-        configured = bool(os.getenv("MCP_HMAC_KEY_ID") and os.getenv("MCP_HMAC_SECRET"))
-        if not configured:
-            return await call_next(context)
-
-        try:
-            fast_ctx = getattr(context, "fastmcp_context", None)
-            if fast_ctx is None or getattr(fast_ctx, "request_context", None) is None:
-                raise PermissionError("missing request context")
-            req = getattr(fast_ctx.request_context, "request", None)
-            if req is None:
-                raise PermissionError("missing request")
-
-            # Extract headers
-            key_id = req.headers.get("X-MCP-KeyId") or req.headers.get("X-MCP-Key")
-            ts = req.headers.get("X-MCP-Timestamp")
-            sig = req.headers.get("X-MCP-Signature")
-            if not key_id or not ts or not sig:
-                raise PermissionError("missing hmac headers")
-
-            # Timestamp freshness (skew up to 300s)
-            try:
-                ts_int = int(ts)
-            except Exception:
-                raise PermissionError("invalid timestamp")
-            now = int(time.time())
-            if abs(now - ts_int) > 300:
-                raise PermissionError("stale timestamp")
-
-            secret = self._load_secret(key_id)
-            if not secret:
-                raise PermissionError("unknown key id")
-
-            method = (getattr(req, "method", "POST") or "POST").upper()
-            path = getattr(getattr(req, "url", None), "path", "/mcp") or "/mcp"
-            base = f"{ts}\n{method}\n{path}"
-            expected = hmac.new(secret.encode("utf-8"), base.encode("utf-8"), hashlib.sha256).hexdigest()
-
-            if not hmac.compare_digest(expected, sig):
-                raise PermissionError("invalid signature")
-
-        except PermissionError:
-            raise
-        except Exception:
-            raise PermissionError("hmac verification failed")
-
-        return await call_next(context)
-
-
 def _extract_request_token(req: Any) -> Optional[str]:
-    """Extract bearer token from Authorization header only."""
+    """Extract Bearer token from Authorization or X-MCP-Token."""
     if req is None:
         return None
 
@@ -468,6 +428,9 @@ def _extract_request_token(req: Any) -> Optional[str]:
     if auth and isinstance(auth, str) and auth.lower().startswith("bearer "):
         token = auth.split(" ", 1)[1].strip()
         return token if token else None
+    xt = _from_headers(req, "x-mcp-token")
+    if xt:
+        return xt
     return None
 
 
@@ -594,13 +557,12 @@ def _request_from_context(context: Any) -> Any:
 
 def _fetch_control_config(
     control_base: str,
-    server_path: str,
     token: str,
     config_schema: Dict[str, Any],
     runtime_context: Dict[str, Any],
     timeout: float,
 ) -> Dict[str, Any]:
-    url = f"{control_base.rstrip('/')}{server_path}"
+    url = f"{control_base.rstrip('/')}/mcp/config"
     payload = {
         "configSchema": config_schema,
         "config_schema": config_schema,
@@ -627,20 +589,23 @@ def _fetch_control_config(
             body = exc.read().decode("utf-8")
         except Exception:
             body = ""
-        raise RuntimeError(f"control server returned {exc.code}: {body}") from exc
+        raise ControlError(exc.code, body) from exc
     except Exception as exc:
-        raise RuntimeError(f"control server request failed: {exc}") from exc
+        raise ControlError(502, str(exc)) from exc
 
     if not raw:
         return {}
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise ControlError(502, f"invalid JSON from control: {exc}") from exc
     if isinstance(parsed, dict):
         if isinstance(parsed.get("config"), dict):
             return parsed["config"]
         if isinstance(parsed.get("data"), dict):
             return parsed["data"]
         return parsed
-    raise RuntimeError("invalid control config response")
+    raise ControlError(502, "invalid control config response")
 
 
 def _build_runtime_context(context: Any, req: Any) -> Dict[str, Any]:
@@ -654,6 +619,11 @@ def _build_runtime_context(context: Any, req: Any) -> Dict[str, Any]:
         server_id = _pick_from_req(req, ["X-MCP-Server-Id"], ["server_id"])
     if server_id:
         ctx["server_id"] = server_id
+
+    if req is not None:
+        inst = _pick_from_req(req, ["X-MCP-Instance-Id"], [])
+        if inst:
+            ctx["instance_id"] = inst
 
     # tool_name: from context, request headers/query, or JSON-RPC method (e.g. "initialize")
     try:

@@ -1,13 +1,29 @@
 # AgentRuntime MCP SDK (Python)
 
-Opinionated SDK for building MCP agents with FastMCP.
+Opinionated SDK for MCP connectors using **FastMCP** with the same **Control** integration as [`agentruntime-mcp-go`](https://github.com/agentruntime-io/agentruntime-mcp-go): optional `POST /mcp/config`, env merge, and request metadata (run token, instance id).
+
+There is **no mandatory legacy standalone token/HMAC middleware chain** in front of every request. Probe-style auth is the **Bearer run token** (or `X-MCP-Token`) and headers AgentRuntime sends; optional `auth.mode` in `config.yaml` is reserved for future templates and does not switch Control gating off.
 
 ## Install
+
 ```bash
 pip install agentruntime-mcp
 ```
 
+## Runtimes
+
+| Entry | When to use | HTTP |
+|--------|-------------|------|
+| **`run(config_path)`** | Decorator-only `tool()` modules; tools registered from `config.yaml` / `build_schemas` | `/mcp` |
+| **`run_with_registry(config_path, *names)`** | Plugins registered with **`register_adapter`**; one process, one MCP server | `/mcp` |
+| **`run_with_router(config_path)`** | Same registry, **monolith routing** (Go **`RunWithRouter`** / TS **`runWithRouter`** parity) | `/{adapter}/mcp` plus optional **webhook** routes on the **same** ASGI app |
+
+Use **`register_adapter`** for anything that should share a process with other adapters. Keep plain **`run()`** for single-connector demos that only use decorators and YAML tools.
+
+**Webhooks:** Implement **`register_webhook(self, mux: ServeMux)`** on the adapter. Paths are registered on the **root** Starlette app **before** adapter mounts (same dispatch order as Go/TS). Operators expose vendor callbacks as `https://<host>:<port><path>` (same host/port as MCP).
+
 ## Minimal example
+
 ```python
 from pydantic import BaseModel, Field
 from agentruntime.mcp.decorators import tool
@@ -24,97 +40,66 @@ class Out(BaseModel):
 
 @tool(name="add", input_model=In, output_model=Out)
 def add(a: float, b: float, ctx: Context) -> Out:
-    # Resolved config from control server is exposed here.
-    region = ctx.config.region  # or ctx.config["region"]
-    return Out(result=a+b, expression=f"{a} + {b}")
+    region = ctx.config.region  # resolved config when schema + Control are used
+    return Out(result=a + b, expression=f"{a} + {b}")
 
 if __name__ == "__main__":
     run("config.yaml")
 ```
 
-## Config
-- `config.yaml` controls server host/port, auth mode, and tracing.  
-- Env overrides: `HOST`, `PORT`, `MCP_AUTH_MODE`.
+## Config (`config.yaml`)
 
-Example `config.yaml`:
+- **`server`:** `name`, `host`, `port`, `stateless_http`
+- **`tracing`:** enable OpenTelemetry when dependencies are present
+- **`config`:** declarative schema for Control / `GET /mcp/config/schema`
+
+Env overrides: **`HOST`**, **`PORT`** (see [`docs/mcp/mcp_env.md`](../../docs/mcp/mcp_env.md)).
+
+Example:
+
 ```yaml
 server:
-  name: "MCPAuthDemo"
+  name: "MyConnector"
   host: "127.0.0.1"
   port: 8012
   stateless_http: true
-
-auth:
-  mode: token   # token|hmac|none
 
 tracing:
   enabled: false
 
 config:
-  accessKeyId:
+  apiKey:
     type: string
-    displayName: Access Key ID
+    displayName: API Key
     required: true
-  secretAccessKey:
-    type: string
-    displayName: Secret Access Key
-    required: true
-  bucket:
-    type: string
-    displayName: Bucket
-    required: true
-  endpoint:
-    type: string
-    displayName: Endpoint
-    required: false
-  region:
-    type: option
-    displayName: Region
-    required: true
-    options:
-      - label: Default
-        value: us-east-1
-      - label: US East (Ohio) [us-east-2]
-        value: us-east-2
 ```
-
-Auth modes
-- `none`: no auth
-- `token`: `Authorization: Bearer <token>` or `X-MCP-Token`; dev fallback `?auth_token=` if `ALLOW_QUERY_TOKEN=true`
-- `hmac`: headers `X-MCP-KeyId`, `X-MCP-Timestamp` (unix seconds), `X-MCP-Signature` (hex(HMAC-SHA256(secret, `${ts}\n${method}\n${path}`)))
 
 ## Control config resolution
 
-The SDK can resolve populated config values from a control server and expose
-them on request context as `ctx.config`.
+When the adapter registers at least one config key:
 
-- Set `MCP_CONTROL_SERVER_URL` (e.g. `http://control-svc:8080`)
-- SDK sends `POST /mcp/config` with your `config.yaml` `config:` schema
-- SDK forwards auth token from middleware (`Authorization` / `X-MCP-Token`)
-- SDK also forwards best-effort `runtime_context` for control-side policy/resolution
-  (tool name plus optional request metadata from headers/query such as
-  `server_id`, `run_id`, `workflow_id`, `call_id`, `trigger_type`, `trigger_id`,
-  `instance_id`, `connection_ids`, `tenant_id_hint`, `project_id_hint`)
-- Returned populated config is exposed as:
-  - `ctx.config.name`
-  - `ctx.config["name"]`
+- Set **`MCP_CONTROL_SERVER_URL`** to your control-service base URL.
+- The SDK may call **`POST /mcp/config`** with the run token from the request and your schema.
+- Set **`MCP_CONFIG_FETCH_REQUIRED=false`** for local work without Control (when you still declare schema keys).
 
-Environment flags:
-- `MCP_CONTROL_SERVER_URL`: control server base URL
-- `MCP_CONTROL_TIMEOUT_SEC`: request timeout (default `5`)
-- `MCP_CONFIG_FETCH_REQUIRED`: fail request if resolution fails (default `true`)
-
-Schema endpoint:
-- `GET /mcp/config/schema` returns the raw `config:` schema from `config.yaml`.
+See [`docs/mcp/mcp_env.md`](../../docs/mcp/mcp_env.md) for the full variable list.
 
 ## Proxy (library)
+
 ```python
 from agentruntime.mcp.proxy import run_proxy
-run_proxy(target_url="http://127.0.0.1:8000/mcp", overlay_file="tools.yaml", host="127.0.0.1", port=8010)
+run_proxy(
+    target_url="http://127.0.0.1:8000/mcp",
+    overlay_file="tools.yaml",
+    host="127.0.0.1",
+    port=8010,
+)
 ```
 
-## Templates
+## TypeScript sibling SDK
 
-Example MCP server using this SDK:
+For Node deployments, use the monorepo package [`packages/agentruntime-mcp-ts`](../agentruntime-mcp-ts/README.md) (`@agentruntime-labs/agentruntime-mcp`): official **`@modelcontextprotocol/server`**, Zod 4, **`runWithRouter`**.
 
-- [connectors/py-connectors/resend-connector](../../connectors/py-connectors/resend-connector/) – Resend (send_email, list_audiences)
+## Examples in this repo
+
+- [`connectors/py-connectors/resend-connector`](../../connectors/py-connectors/resend-connector/) — Python Resend connector (illustrative layout)

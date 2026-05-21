@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentruntime-mcp"
 version = "0.0.1"
-description = "AgentRuntime MCP SDK (decorators, runtime, middleware, schemas, proxy, generators)"
+description = "AgentRuntime MCP SDK (decorators, runtime, middleware, schemas, proxy)"
 requires-python = ">=3.10"
 readme = "README.md"
 authors = [{ name = "AgentRuntime" }]
@@ -27,4 +27,9 @@ test = ["pytest>=7.0"]
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
