@@ -17,6 +17,10 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from .context import attach_config_to_ctx, reset_request_context, set_request_context
 from .errors import ControlError, human_message_from_control_api_body
 
+HEADER_MCP_INSTANCE_ID = "X-MCP-Instance-Id"
+# Control discover/validate probes; not supplied by AgentRuntime at runtime (instance header is).
+HEADER_MCP_SERVER_ID = "X-MCP-Server-Id"
+
 # Context var for HTTP request when processing initialize in stateless mode.
 # Patched MiddlewareServerSession sets this from responder.message_metadata.request_context
 # before middleware runs, so ControlConfigMiddleware can read headers/tokens.
@@ -613,17 +617,20 @@ def _build_runtime_context(context: Any, req: Any) -> Dict[str, Any]:
     Control resolves tenant_id, user_id, workflow_id, run_id from the Bearer run token."""
     ctx: Dict[str, Any] = {}
 
-    # server_id: MCP_SERVER_ID env or header/query (fallback when X-MCP-Instance-Id is absent; AgentRuntime normally sends the instance header)
-    server_id = os.environ.get("MCP_SERVER_ID", "").strip()
-    if not server_id and req is not None:
-        server_id = _pick_from_req(req, ["X-MCP-Server-Id"], ["server_id"])
-    if server_id:
-        ctx["server_id"] = server_id
-
     if req is not None:
-        inst = _pick_from_req(req, ["X-MCP-Instance-Id"], [])
+        inst = _pick_from_req(req, [HEADER_MCP_INSTANCE_ID], [])
         if inst:
             ctx["instance_id"] = inst
+
+    # server_id: header/query first, then MCP_SERVER_ID env overwrites (matches agentruntime-mcp-go).
+    server_id = ""
+    if req is not None:
+        server_id = _pick_from_req(req, [HEADER_MCP_SERVER_ID], ["server_id"])
+    env_server_id = os.environ.get("MCP_SERVER_ID", "").strip()
+    if env_server_id:
+        server_id = env_server_id
+    if server_id:
+        ctx["server_id"] = server_id
 
     # tool_name: from context, request headers/query, or JSON-RPC method (e.g. "initialize")
     try:
