@@ -150,8 +150,10 @@ def run_with_router(config_path: str = "config.yaml") -> None:
             if callable(reg):
                 reg(mux)
 
+    from .bridge import bridge_routes
+
     sub_apps: List[Any] = []
-    routes: List[Any] = []
+    routes: List[Any] = list(bridge_routes())
     for path, handler in mux:
         routes.append(Route(path, endpoint=handler, methods=list(_WEBHOOK_METHODS)))
     for n in names:
