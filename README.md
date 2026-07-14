@@ -96,6 +96,19 @@ run_proxy(
 )
 ```
 
+## Tool organization (`toolorg`)
+
+Large connectors can build publish metadata for Control catalog grouping. Parity with Go `toolorg` — see [MCP_SDK_PARITY.md](../../docs/mcp/MCP_SDK_PARITY.md).
+
+```python
+from agentruntime.mcp.toolorg import publisher_metadata, Metadata
+
+meta = publisher_metadata("clickup_get_task", Metadata())
+# → display_name, suggested_group, suggested_tags for mcp_tools.metadata
+```
+
+Per-request caller bearer (for downstream HTTP): `request_bearer_from_context()`.
+
 ## TypeScript sibling SDK
 
 For Node deployments, use the monorepo package [`packages/agentruntime-mcp-ts`](../agentruntime-mcp-ts/README.md) (`@agentruntime-labs/agentruntime-mcp`): official **`@modelcontextprotocol/server`**, Zod 4, **`runWithRouter`**.
