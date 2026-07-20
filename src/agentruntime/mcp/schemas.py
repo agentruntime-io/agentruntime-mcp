@@ -4,6 +4,11 @@ from typing import Any, Dict, Optional, Type, List, get_args, get_origin
 from pydantic import BaseModel
 from enum import Enum
 
+try:
+    from pydantic_core import PydanticUndefined
+except ImportError:  # pragma: no cover - pydantic v1 fallback
+    PydanticUndefined = object()  # type: ignore[assignment,misc]
+
 
 def _map_type_json(py_type: Any) -> Dict[str, Any]:
     origin = get_origin(py_type)
@@ -70,6 +75,14 @@ def _json_constraints(prop: Dict[str, Any], field_info: Any) -> None:
         prop["items"] = items
 
 
+def _explicit_default(field: Any) -> Any:
+    """Return a field default only when the author set one explicitly."""
+    default = getattr(field, "default", PydanticUndefined)
+    if default is not PydanticUndefined:
+        return default
+    return PydanticUndefined
+
+
 def emit_json_shape(model_cls: Optional[Type[BaseModel]]) -> Dict[str, Any]:
     if not model_cls:
         return {"properties": {}}
@@ -99,6 +112,9 @@ def emit_json_shape(model_cls: Optional[Type[BaseModel]]) -> Dict[str, Any]:
         if desc:
             prop["description"] = desc
         _json_constraints(prop, info)
+        default = _explicit_default(f)
+        if default is not PydanticUndefined and default is not None:
+            prop["default"] = default
         # Alias support
         alias = getattr(info, "alias", None)
         json_name = alias or name
