@@ -19,6 +19,7 @@ class ToolRegistry:
         input_model: Optional[Type[BaseModel]],
         output_model: Optional[Type[BaseModel]],
         description: Optional[str],
+        hold: bool = False,
     ) -> None:
         self.entries.append(
             {
@@ -27,6 +28,7 @@ class ToolRegistry:
                 "in_model": input_model,
                 "out_model": output_model,
                 "desc": (description or "").strip() or None,
+                "hold": bool(hold),
             }
         )
 
@@ -39,12 +41,32 @@ def tool(
     input_model: Optional[Type[BaseModel]] = None,
     output_model: Optional[Type[BaseModel]] = None,
     description: Optional[str] = None,
+    hold: bool = False,
 ):
     def deco(func: Callable[..., Any]) -> Callable[..., Any]:
-        registry.register(name, func, input_model, output_model, description or getattr(func, "__doc__", None))
+        registry.register(
+            name,
+            func,
+            input_model,
+            output_model,
+            description or getattr(func, "__doc__", None),
+            hold=hold,
+        )
         return func
 
     return deco
+
+
+def registered_tool_names() -> List[str]:
+    return [e["name"] for e in registry.entries]
+
+
+def held_tool_names() -> List[str]:
+    return [e["name"] for e in registry.entries if e.get("hold")]
+
+
+def publishable_entries() -> List[Dict[str, Any]]:
+    return [e for e in registry.entries if not e.get("hold")]
 
 
 def mount_tools(
@@ -102,5 +124,4 @@ def mount_tools(
         return {"tools": items}
 
     return exposed
-
 
