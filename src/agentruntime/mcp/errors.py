@@ -13,9 +13,10 @@ class ErrAdapterNotFound(LookupError):
 
 
 class ControlError(RuntimeError):
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, retry_after_sec: int = 0) -> None:
         self.status = status
         self.body = body
+        self.retry_after_sec = retry_after_sec
         super().__init__(f"control server returned {status}: {body}".strip())
 
 

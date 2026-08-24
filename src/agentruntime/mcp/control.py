@@ -10,6 +10,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .errors import ControlError
+from .config_cache import retry_after_from_control_body
 
 HEADER_MCP_INSTANCE_ID = "X-MCP-Instance-Id"
 HEADER_MCP_SERVER_ID = "X-MCP-Server-Id"
@@ -63,11 +64,20 @@ def fetch_control_payload(
             raw = resp.read().decode("utf-8")
     except urlerror.HTTPError as exc:
         body = ""
+        retry_after = 0
         try:
             body = exc.read().decode("utf-8")
         except Exception:
             body = ""
-        raise ControlError(exc.code, body) from exc
+        ra_hdr = exc.headers.get("Retry-After") if exc.headers else None
+        if ra_hdr:
+            try:
+                retry_after = int(str(ra_hdr).strip())
+            except ValueError:
+                retry_after = 0
+        if retry_after <= 0:
+            retry_after = retry_after_from_control_body(body)
+        raise ControlError(exc.code, body, retry_after_sec=retry_after) from exc
     except Exception as exc:
         raise ControlError(502, str(exc)) from exc
 

@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from .context import attach_config_to_ctx, reset_request_context, set_request_context
 from .errors import ControlError, human_message_from_control_api_body
+from .config_cache import fetch_control_config_cached, retry_after_from_control_body
 
 HEADER_MCP_INSTANCE_ID = "X-MCP-Instance-Id"
 # Control discover/validate probes; not supplied by AgentRuntime at runtime (instance header is).
@@ -340,12 +341,13 @@ class ControlConfigMiddleware(Middleware):
                 timeout = float(os.getenv("MCP_CONTROL_TIMEOUT_SEC", "5"))
                 try:
                     resolved = await asyncio.to_thread(
-                        _fetch_control_config,
+                        fetch_control_config_cached,
                         control_base,
                         token,
                         self.config_schema,
                         runtime_context,
                         timeout,
+                        _fetch_control_config,
                     )
                     cfg_dict = resolved or {}
                 except ControlError as exc:
@@ -589,11 +591,20 @@ def _fetch_control_config(
             raw = resp.read().decode("utf-8")
     except urlerror.HTTPError as exc:
         body = ""
+        retry_after = 0
         try:
             body = exc.read().decode("utf-8")
         except Exception:
             body = ""
-        raise ControlError(exc.code, body) from exc
+        ra_hdr = exc.headers.get("Retry-After") if exc.headers else None
+        if ra_hdr:
+            try:
+                retry_after = int(str(ra_hdr).strip())
+            except ValueError:
+                retry_after = 0
+        if retry_after <= 0:
+            retry_after = retry_after_from_control_body(body)
+        raise ControlError(exc.code, body, retry_after_sec=retry_after) from exc
     except Exception as exc:
         raise ControlError(502, str(exc)) from exc
 
