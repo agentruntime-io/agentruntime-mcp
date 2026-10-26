@@ -47,6 +47,18 @@ if __name__ == "__main__":
     run("config.yaml")
 ```
 
+## Read-only labels
+
+AgentRuntime labels each published tool read-only or not. Say so on the decorator; leave it out and control-service infers the label from the tool name (a plain read verb and nothing that writes, runs caller input, spends money or returns secrets) and shows it as inferred.
+
+```python
+@tool(name="acme_list_items", read_only=True)          # changes nothing
+@tool(name="acme_get_updates", read_only=False)        # reads like a read but acknowledges what it reads
+@tool(name="acme_send", annotations={"destructiveHint": False})  # any MCP annotations
+```
+
+`read_only` becomes `annotations.readOnlyHint` in tools/list; `False` is sent too, so it stays distinct from "not given". A changed hint reaches the platform on control's 15-minute schema check, without a manual publish (control-service `docs/mcp-tool-read-only-labels.md`).
+
 ## Config (`config.yaml`)
 
 - **`server`:** `name`, `host`, `port`, `stateless_http`

@@ -20,6 +20,7 @@ class ToolRegistry:
         output_model: Optional[Type[BaseModel]],
         description: Optional[str],
         hold: bool = False,
+        annotations: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.entries.append(
             {
@@ -29,11 +30,29 @@ class ToolRegistry:
                 "out_model": output_model,
                 "desc": (description or "").strip() or None,
                 "hold": bool(hold),
+                "annotations": dict(annotations) if annotations else None,
             }
         )
 
 
 registry = ToolRegistry()
+
+
+def tool_annotations(
+    read_only: Optional[bool] = None,
+    annotations: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """MCP tool annotations for tools/list: ``annotations`` (MCP names, e.g. ``destructiveHint``) plus
+    ``readOnlyHint`` from ``read_only`` when it is given.
+
+    The platform labels a tool read-only from ``readOnlyHint``. ``read_only=True`` marks a tool that changes
+    nothing; ``read_only=False`` says it may change things, so it is never labelled read-only. Leave it out and
+    control-service infers the label from the tool name (shown as inferred).
+    """
+    out: Dict[str, Any] = dict(annotations or {})
+    if read_only is not None:
+        out["readOnlyHint"] = bool(read_only)
+    return out or None
 
 
 def tool(
@@ -42,7 +61,12 @@ def tool(
     output_model: Optional[Type[BaseModel]] = None,
     description: Optional[str] = None,
     hold: bool = False,
+    read_only: Optional[bool] = None,
+    annotations: Optional[Dict[str, Any]] = None,
 ):
+    """Register a tool. ``read_only`` and ``annotations`` become the tool's MCP annotations (see
+    ``tool_annotations``)."""
+
     def deco(func: Callable[..., Any]) -> Callable[..., Any]:
         registry.register(
             name,
@@ -51,6 +75,7 @@ def tool(
             output_model,
             description or getattr(func, "__doc__", None),
             hold=hold,
+            annotations=tool_annotations(read_only, annotations),
         )
         return func
 
@@ -79,6 +104,8 @@ def mount_tools(
         raw_fn = e["func"]
         s_in, s_out = schema_builder(e.get("in_model"), e.get("out_model"))
         tool_kwargs: Dict[str, Any] = {"name": e["name"]}
+        if e.get("annotations"):
+            tool_kwargs["annotations"] = dict(e["annotations"])
         if e.get("out_model") and s_out:
             s_out_copy = dict(s_out)
             if "type" not in s_out_copy:
@@ -113,14 +140,15 @@ def mount_tools(
         items: List[Dict[str, Any]] = []
         for e, _ in exposed:
             s_in, s_out = schema_builder(e.get("in_model"), e.get("out_model"))
-            items.append(
-                {
-                    "name": e["name"],
-                    "description": e.get("desc"),
-                    "inputSchema": s_in,
-                    "outputSchema": s_out,
-                }
-            )
+            item: Dict[str, Any] = {
+                "name": e["name"],
+                "description": e.get("desc"),
+                "inputSchema": s_in,
+                "outputSchema": s_out,
+            }
+            if e.get("annotations"):
+                item["annotations"] = dict(e["annotations"])
+            items.append(item)
         return {"tools": items}
 
     return exposed
